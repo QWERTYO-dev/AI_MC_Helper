@@ -18,7 +18,8 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, '')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'main.html')));
 app.get('/health', (req, res) => res.status(200).json({
-  status: 'ok', botRunning: bot !== null,
+  status: 'ok',
+  botRunning: bot !== null,
   botUsername: bot && bot.player ? bot.username : null,
   target: `${serverHost}:${serverPort}`,
 }));
@@ -54,7 +55,10 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(httpPort, () => { console.log(`HTTP server listening on port ${httpPort}.`); createBot(); });
+server.listen(httpPort, () => {
+  console.log(`HTTP server listening on port ${httpPort}.`);
+  createBot();
+});
 
 function createBot() {
   clearReconnectTimer();
@@ -69,9 +73,16 @@ function createBot() {
       host: serverHost,
       port: serverPort,
       username: botUsername,
-      version: '1.21.1',
+      // FIX 1: Remove hardcoded version so mineflayer auto-negotiates with
+      // ViaVersion/ViaBackwards. Hardcoding '1.21.1' causes an immediate
+      // protocol mismatch kick when the server reports a different version.
+      // version: false, // let mineflayer ping and detect
       auth: 'offline',
-      hideErrors: false,
+      hideErrors: true,  // FIX 2: true prevents crashes from stray packets
+                         // while still logging them via the 'error' event
+      // FIX 3: Give the connection more time before timing out on Aternos
+      // (Aternos servers spin up slowly and may stall the handshake)
+      connectTimeout: 30000,
     });
   } catch (err) {
     console.error('Failed to create bot:', err.message);
@@ -82,20 +93,16 @@ function createBot() {
 
   bot = newBot;
 
-  // ── Resource pack: decline first; if server forces it, accept instead ──
-  let packDeclined = false;
-  bot.on('resource_pack_send', (url) => {
-    if (!packDeclined) {
-      packDeclined = true;
-      console.log('[ResourcePack] Declining pack...');
-      try { bot.acceptResourcePack(false); } catch (e) {
-        console.log('[ResourcePack] Decline failed, accepting:', e.message);
-        try { bot.acceptResourcePack(true); } catch (_) {}
-      }
-    } else {
-      // Server re-sent after decline → it's forced, accept it
-      console.log('[ResourcePack] Server re-sent pack (forced) — accepting.');
-      try { bot.acceptResourcePack(true); } catch (e) {}
+  // ── FIX 4: Resource pack — always accept immediately ──────────────────────
+  // Servers with forced resource packs will kick a bot that declines.
+  // The old two-stage decline→accept logic was racing with the kick timer.
+  // Just accept every pack unconditionally; the bot doesn't render it anyway.
+  bot.on('resource_pack_send', (url, _hash, _forced, _promptMessage) => {
+    console.log(`[ResourcePack] Accepting pack from: ${url}`);
+    try {
+      bot.acceptResourcePack(true);
+    } catch (e) {
+      console.warn('[ResourcePack] acceptResourcePack error (non-fatal):', e.message);
     }
   });
 
@@ -110,12 +117,14 @@ function createBot() {
     startAntiAfk();
   });
 
-  // ── Auto-respawn on death ──
+  // ── Auto-respawn on death ─────────────────────────────────────────────────
   bot.on('death', () => {
     console.log('Bot died. Respawning in 1s...');
     io.emit('bot_status', 'Bot died, respawning...');
     setTimeout(() => {
-      if (bot) { try { bot.respawn(); } catch (e) { console.log('Respawn error:', e.message); } }
+      if (bot) {
+        try { bot.respawn(); } catch (e) { console.log('Respawn error:', e.message); }
+      }
     }, 1000);
   });
 
@@ -127,11 +136,13 @@ function createBot() {
     } catch (_) {}
     console.log(`Bot kicked: ${message}`);
     io.emit('bot_status', `Kicked: ${message}`);
+    // Note: 'end' fires after 'kicked', so reconnect is handled there.
   });
 
   bot.on('error', (err) => {
-    console.error('Bot error:', err && err.message ? err.message : err);
-    io.emit('bot_status', `Error: ${err && err.message ? err.message : err}`);
+    const msg = err && err.message ? err.message : String(err);
+    console.error('Bot error:', msg);
+    io.emit('bot_status', `Error: ${msg}`);
   });
 
   bot.on('end', (reason) => {
@@ -143,11 +154,10 @@ function createBot() {
   });
 }
 
-// ── Improved anti-AFK: varied moves, occasional sprint+jump, smooth look ──
+// ── Anti-AFK: varied moves, occasional sprint+jump, smooth look ──────────────
 function startAntiAfk() {
   stopAntiAfk();
 
-  // Track current step in a small sequence so behaviour feels less random/robotic
   let step = 0;
   const sequence = [
     { move: 'forward', duration: 800,  jump: false, sprint: true  },
@@ -166,7 +176,6 @@ function startAntiAfk() {
       const s = sequence[step % sequence.length];
       step++;
 
-      // Smooth look: small random nudge instead of full random spin
       const yaw   = bot.entity.yaw   + (Math.random() - 0.5) * (Math.PI / 2);
       const pitch = Math.max(-0.4, Math.min(0.4, bot.entity.pitch + (Math.random() - 0.5) * 0.3));
       bot.look(yaw, pitch, true).catch(() => {});
@@ -185,7 +194,6 @@ function startAntiAfk() {
         bot.setControlState('sprint', false);
       }, s.duration);
 
-      // Swing arm occasionally (not every tick)
       if (step % 3 === 0) bot.swingArm('right');
 
     } catch (err) {
@@ -238,7 +246,9 @@ function clearReconnectTimer() {
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down.');
-  manualStop = true; stopBot('Server shutting down.'); process.exit(0);
+  manualStop = true;
+  stopBot('Server shutting down.');
+  process.exit(0);
 });
 
 process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); });
