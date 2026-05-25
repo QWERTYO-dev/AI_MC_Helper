@@ -4,12 +4,11 @@ const http = require('http');
 const { Server } = require('socket.io');
 const mineflayer = require('mineflayer');
 
-const serverHost = process.env.SERVER_HOST || 'DOOMS_DAY_REBORN.aternos.me';
-const serverPort = parseInt(process.env.SERVER_PORT || '59173', 10);
-const botUsername = process.env.BOT_USERNAME || '247_Monitor';
-const minecraftVersion = process.env.MC_VERSION || false;
-const reconnectInterval = parseInt(process.env.RECONNECT_INTERVAL_MS || '40000', 10);
-const antiAfkInterval = parseInt(process.env.ANTI_AFK_INTERVAL_MS || '20000', 10);
+const serverHost = process.env.SERVER_HOST || 'COZYGGSMP.aternos.me';
+const serverPort = parseInt(process.env.SERVER_PORT || '56155', 10);
+const botUsername = process.env.BOT_USERNAME || 'COZY_Farmer';
+const reconnectInterval = parseInt(process.env.RECONNECT_INTERVAL_MS || '15000', 10);
+const antiAfkInterval = parseInt(process.env.ANTI_AFK_INTERVAL_MS || '8000', 10);
 const httpPort = parseInt(process.env.PORT || '3000', 10);
 
 const app = express();
@@ -17,19 +16,12 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, '')));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'main.html'));
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    botRunning: bot !== null,
-    botUsername: bot && bot.player ? bot.username : null,
-    target: `${serverHost}:${serverPort}`,
-  });
-});
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'main.html')));
+app.get('/health', (req, res) => res.status(200).json({
+  status: 'ok', botRunning: bot !== null,
+  botUsername: bot && bot.player ? bot.username : null,
+  target: `${serverHost}:${serverPort}`,
+}));
 
 let bot = null;
 let antiAfkTimer = null;
@@ -38,24 +30,15 @@ let manualStop = false;
 
 io.on('connection', (socket) => {
   console.log('Web client connected.');
-
-  if (bot && bot.player) {
-    socket.emit('bot_status', `Bot ${bot.username} is online.`);
-  } else if (bot) {
-    socket.emit('bot_status', 'Bot is connecting...');
-  } else {
-    socket.emit('bot_status', 'Bot is offline.');
-  }
+  if (bot && bot.player)   socket.emit('bot_status', `Bot ${bot.username} is online.`);
+  else if (bot)            socket.emit('bot_status', 'Bot is connecting...');
+  else                     socket.emit('bot_status', 'Bot is offline.');
 
   socket.on('control_bot', (command) => {
     switch (command) {
       case 'start':
         manualStop = false;
-        if (!bot) {
-          createBot();
-        } else {
-          io.emit('bot_status', 'Bot is already running.');
-        }
+        if (!bot) createBot(); else io.emit('bot_status', 'Bot is already running.');
         break;
       case 'stop':
         manualStop = true;
@@ -67,23 +50,15 @@ io.on('connection', (socket) => {
         break;
       default:
         console.log(`Unknown command: ${command}`);
-        break;
     }
   });
 });
 
-server.listen(httpPort, () => {
-  console.log(`HTTP server listening on port ${httpPort}.`);
-  createBot();
-});
+server.listen(httpPort, () => { console.log(`HTTP server listening on port ${httpPort}.`); createBot(); });
 
 function createBot() {
   clearReconnectTimer();
-
-  if (bot) {
-    console.log('Bot instance already exists; skipping create.');
-    return;
-  }
+  if (bot) { console.log('Bot instance already exists; skipping create.'); return; }
 
   console.log(`Connecting bot "${botUsername}" to ${serverHost}:${serverPort} ...`);
   io.emit('bot_status', `Connecting to ${serverHost}:${serverPort}...`);
@@ -94,7 +69,7 @@ function createBot() {
       host: serverHost,
       port: serverPort,
       username: botUsername,
-      version: minecraftVersion,
+      version: '1.21.1',
       auth: 'offline',
       hideErrors: false,
     });
@@ -107,26 +82,41 @@ function createBot() {
 
   bot = newBot;
 
+  // ── Resource pack: decline first; if server forces it, accept instead ──
+  let packDeclined = false;
+  bot.on('resource_pack_send', (url) => {
+    if (!packDeclined) {
+      packDeclined = true;
+      console.log('[ResourcePack] Declining pack...');
+      try { bot.acceptResourcePack(false); } catch (e) {
+        console.log('[ResourcePack] Decline failed, accepting:', e.message);
+        try { bot.acceptResourcePack(true); } catch (_) {}
+      }
+    } else {
+      // Server re-sent after decline → it's forced, accept it
+      console.log('[ResourcePack] Server re-sent pack (forced) — accepting.');
+      try { bot.acceptResourcePack(true); } catch (e) {}
+    }
+  });
+
   bot.once('login', () => {
-    console.log(`Bot "${bot.username}" logged in to ${serverHost}.`);
+    console.log(`Bot "${bot.username}" logged in.`);
     io.emit('bot_status', `Bot ${bot.username} logged in.`);
   });
 
   bot.once('spawn', () => {
-    console.log(`Bot "${bot.username}" spawned in the world.`);
+    console.log(`Bot "${bot.username}" spawned.`);
     io.emit('bot_status', `Bot ${bot.username} spawned. Anti-AFK active.`);
     startAntiAfk();
   });
 
-  bot.on('health', () => {
-    if (bot && bot.health <= 0) {
-      console.log('Bot has died, will respawn automatically.');
-    }
-  });
-
+  // ── Auto-respawn on death ──
   bot.on('death', () => {
-    console.log('Bot died. Respawning.');
-    io.emit('bot_status', 'Bot died, respawning.');
+    console.log('Bot died. Respawning in 1s...');
+    io.emit('bot_status', 'Bot died, respawning...');
+    setTimeout(() => {
+      if (bot) { try { bot.respawn(); } catch (e) { console.log('Respawn error:', e.message); } }
+    }, 1000);
   });
 
   bot.on('kicked', (reason) => {
@@ -134,9 +124,7 @@ function createBot() {
     try {
       const parsed = typeof reason === 'string' ? JSON.parse(reason) : reason;
       message = (parsed && (parsed.text || parsed.translate)) || JSON.stringify(parsed);
-    } catch (_) {
-      // Reason was not JSON; use as-is.
-    }
+    } catch (_) {}
     console.log(`Bot kicked: ${message}`);
     io.emit('bot_status', `Kicked: ${message}`);
   });
@@ -149,42 +137,57 @@ function createBot() {
   bot.on('end', (reason) => {
     console.log(`Bot disconnected. Reason: ${reason || 'unknown'}.`);
     cleanupBot();
-    if (manualStop) {
-      io.emit('bot_status', 'Bot stopped.');
-      return;
-    }
+    if (manualStop) { io.emit('bot_status', 'Bot stopped.'); return; }
     io.emit('bot_status', `Disconnected (${reason || 'unknown'}). Reconnecting in ${reconnectInterval / 1000}s.`);
     scheduleReconnect();
   });
 }
 
+// ── Improved anti-AFK: varied moves, occasional sprint+jump, smooth look ──
 function startAntiAfk() {
   stopAntiAfk();
 
+  // Track current step in a small sequence so behaviour feels less random/robotic
+  let step = 0;
+  const sequence = [
+    { move: 'forward', duration: 800,  jump: false, sprint: true  },
+    { move: 'forward', duration: 600,  jump: true,  sprint: true  },
+    { move: 'left',    duration: 400,  jump: false, sprint: false },
+    { move: 'forward', duration: 1000, jump: false, sprint: false },
+    { move: 'right',   duration: 400,  jump: false, sprint: false },
+    { move: 'back',    duration: 500,  jump: false, sprint: false },
+    { move: 'forward', duration: 700,  jump: true,  sprint: true  },
+    { move: 'left',    duration: 300,  jump: false, sprint: false },
+  ];
+
   antiAfkTimer = setInterval(() => {
     if (!bot || !bot.entity) return;
-
     try {
-      const moves = ['forward', 'back', 'left', 'right'];
-      const move = moves[Math.floor(Math.random() * moves.length)];
+      const s = sequence[step % sequence.length];
+      step++;
 
-      bot.setControlState(move, true);
-      setTimeout(() => {
-        if (bot) bot.setControlState(move, false);
-      }, 600);
-
-      if (Math.random() < 0.4) {
-        bot.setControlState('jump', true);
-        setTimeout(() => {
-          if (bot) bot.setControlState('jump', false);
-        }, 250);
-      }
-
-      const yaw = (Math.random() - 0.5) * Math.PI * 2;
-      const pitch = (Math.random() - 0.5) * (Math.PI / 3);
+      // Smooth look: small random nudge instead of full random spin
+      const yaw   = bot.entity.yaw   + (Math.random() - 0.5) * (Math.PI / 2);
+      const pitch = Math.max(-0.4, Math.min(0.4, bot.entity.pitch + (Math.random() - 0.5) * 0.3));
       bot.look(yaw, pitch, true).catch(() => {});
 
-      bot.swingArm('right');
+      if (s.sprint) bot.setControlState('sprint', true);
+      bot.setControlState(s.move, true);
+
+      if (s.jump) {
+        bot.setControlState('jump', true);
+        setTimeout(() => { if (bot) bot.setControlState('jump', false); }, 250);
+      }
+
+      setTimeout(() => {
+        if (!bot) return;
+        bot.setControlState(s.move, false);
+        bot.setControlState('sprint', false);
+      }, s.duration);
+
+      // Swing arm occasionally (not every tick)
+      if (step % 3 === 0) bot.swingArm('right');
+
     } catch (err) {
       console.error('Anti-AFK error:', err.message);
     }
@@ -192,28 +195,19 @@ function startAntiAfk() {
 }
 
 function stopAntiAfk() {
-  if (antiAfkTimer) {
-    clearInterval(antiAfkTimer);
-    antiAfkTimer = null;
-  }
+  if (antiAfkTimer) { clearInterval(antiAfkTimer); antiAfkTimer = null; }
 }
 
 function cleanupBot() {
   stopAntiAfk();
-  if (bot) {
-    bot.removeAllListeners();
-  }
+  if (bot) { bot.removeAllListeners(); }
   bot = null;
 }
 
 function stopBot(message) {
   clearReconnectTimer();
   if (bot) {
-    try {
-      bot.quit(message || 'Bye');
-    } catch (err) {
-      console.error('Error quitting bot:', err.message);
-    }
+    try { bot.quit(message || 'Bye'); } catch (err) { console.error('Error quitting bot:', err.message); }
     cleanupBot();
     console.log(message || 'Bot stopped.');
     io.emit('bot_status', message || 'Bot stopped.');
@@ -225,19 +219,9 @@ function stopBot(message) {
 function reconnectBot() {
   console.log('Manual reconnect requested.');
   io.emit('bot_status', 'Reconnecting bot...');
-  if (bot) {
-    try {
-      bot.quit('Reconnecting');
-    } catch (err) {
-      console.error('Error during manual reconnect:', err.message);
-    }
-    cleanupBot();
-  }
+  if (bot) { try { bot.quit('Reconnecting'); } catch (err) {} cleanupBot(); }
   clearReconnectTimer();
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    createBot();
-  }, 1000);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; createBot(); }, 1000);
 }
 
 function scheduleReconnect() {
@@ -249,19 +233,12 @@ function scheduleReconnect() {
 }
 
 function clearReconnectTimer() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 }
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down.');
-  manualStop = true;
-  stopBot('Server shutting down.');
-  process.exit(0);
+  manualStop = true; stopBot('Server shutting down.'); process.exit(0);
 });
 
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
+process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); });
