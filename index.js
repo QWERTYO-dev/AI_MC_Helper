@@ -7,6 +7,8 @@ const mineflayer = require('mineflayer');
 const serverHost = process.env.SERVER_HOST || 'COZYGGSMP.aternos.me';
 const serverPort = parseInt(process.env.SERVER_PORT || '56155', 10);
 const botUsername = process.env.BOT_USERNAME || 'COZY_Farmer';
+const botPassword = process.env.BOT_PASSWORD || '';          // for AuthMe: /register & /login
+const serverVersion = process.env.SERVER_VERSION || false;   // e.g. '1.21.4' — leave blank to auto-detect
 const reconnectInterval = parseInt(process.env.RECONNECT_INTERVAL_MS || '15000', 10);
 const antiAfkInterval = parseInt(process.env.ANTI_AFK_INTERVAL_MS || '8000', 10);
 const httpPort = parseInt(process.env.PORT || '3000', 10);
@@ -73,10 +75,9 @@ function createBot() {
       host: serverHost,
       port: serverPort,
       username: botUsername,
-      // FIX 1: Remove hardcoded version so mineflayer auto-negotiates with
-      // ViaVersion/ViaBackwards. Hardcoding '1.21.1' causes an immediate
-      // protocol mismatch kick when the server reports a different version.
-      // version: false, // let mineflayer ping and detect
+      // Set SERVER_VERSION env var on Render if auto-detect fails.
+      // e.g. '1.21.4' to match whatever ViaVersion advertises.
+      version: serverVersion,
       auth: 'offline',
       hideErrors: true,  // FIX 2: true prevents crashes from stray packets
                          // while still logging them via the 'error' event
@@ -94,15 +95,28 @@ function createBot() {
   bot = newBot;
 
   // ── FIX 4: Resource pack — always accept immediately ──────────────────────
-  // Servers with forced resource packs will kick a bot that declines.
-  // The old two-stage decline→accept logic was racing with the kick timer.
-  // Just accept every pack unconditionally; the bot doesn't render it anyway.
-  bot.on('resource_pack_send', (url, _hash, _forced, _promptMessage) => {
-    console.log(`[ResourcePack] Accepting pack from: ${url}`);
-    try {
-      bot.acceptResourcePack(true);
-    } catch (e) {
+  // Support both old and new mineflayer event names across versions.
+  const acceptPack = (url) => {
+    console.log(`[ResourcePack] Accepting pack: ${url}`);
+    try { bot.acceptResourcePack(true); } catch (e) {
       console.warn('[ResourcePack] acceptResourcePack error (non-fatal):', e.message);
+    }
+  };
+  bot.on('resource_pack_send', acceptPack);
+  bot.on('resourcePack', acceptPack); // newer mineflayer versions use this name
+
+  // ── AuthMe / login plugin handler ─────────────────────────────────────────
+  // If the server uses AuthMe or similar, the bot must respond to login prompts.
+  // Set BOT_PASSWORD env var on Render to enable this.
+  bot.on('message', (jsonMsg) => {
+    if (!botPassword) return;
+    const text = jsonMsg.toString().toLowerCase();
+    if (text.includes('register') || text.includes('/register')) {
+      console.log('[Auth] Server asked to register. Sending /register...');
+      bot.chat(`/register ${botPassword} ${botPassword}`);
+    } else if (text.includes('login') || text.includes('/login')) {
+      console.log('[Auth] Server asked to login. Sending /login...');
+      bot.chat(`/login ${botPassword}`);
     }
   });
 
@@ -129,14 +143,23 @@ function createBot() {
   });
 
   bot.on('kicked', (reason) => {
+    // Decode the kick reason fully — it's often nested JSON from Paper/Spigot
     let message = reason;
     try {
       const parsed = typeof reason === 'string' ? JSON.parse(reason) : reason;
-      message = (parsed && (parsed.text || parsed.translate)) || JSON.stringify(parsed);
+      // Recursively extract text
+      const extract = (obj) => {
+        if (!obj) return '';
+        if (typeof obj === 'string') return obj;
+        let out = obj.text || obj.translate || '';
+        if (obj.extra) out += obj.extra.map(extract).join('');
+        if (obj.with)  out += ' ' + obj.with.map(extract).join(' ');
+        return out;
+      };
+      message = extract(parsed) || JSON.stringify(parsed);
     } catch (_) {}
-    console.log(`Bot kicked: ${message}`);
+    console.log(`Bot kicked — reason: "${message}"`);
     io.emit('bot_status', `Kicked: ${message}`);
-    // Note: 'end' fires after 'kicked', so reconnect is handled there.
   });
 
   bot.on('error', (err) => {
